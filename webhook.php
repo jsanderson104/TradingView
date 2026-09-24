@@ -23,6 +23,9 @@ if ($data === null) {
     exit;
 }
 
+// IMPORTANT: The json data sent to this PHP page should include the passphrase.
+// EXAMPLE: curl -X POST -H "application/json" '{"passphrase":"secret", "key1":"The Rest ", "key2":"of your payload data"}' . There is an example payload that can be used with the curl -d @payload command you can use to send/test/POST data to the webhook.php page for testing.
+
 if (!isset($data['passphrase']) || $data['passphrase'] !== WEBHOOK_PASSPHRASE) {
     http_response_code(401);
     echo json_encode(['status' => 'error', 'message' => 'Unauthorized']);
