@@ -1,0 +1,9 @@
+{
+  "passphrase": "secret",
+  "event": "Alert Triggered",
+  "ticker": "{{ticker}}",
+  "exchange": "{{exchange}}",
+  "price": "{{close}}",
+  "volume": "{{volume}}",
+  "time": "{{timenow}}"
+}
