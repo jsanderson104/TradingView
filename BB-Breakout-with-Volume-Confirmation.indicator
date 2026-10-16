@@ -1,0 +1,113 @@
+//@version=6
+indicator("BB Breakout Strategy (Engine Loop Fixed)", overlay = true)
+
+// ==========================================
+// 1. INPUTS & CALCULATIONS
+// ==========================================
+
+// Bollinger Bands Inputs & Calculations
+bbLength = input.int(20, title="BB Length")
+bbMult   = input.float(2.0, title="BB StdDev Multiplier")
+[bbMiddle, bbUpper, bbLower] = ta.bb(close, bbLength, bbMult)
+
+// RSI Inputs & Calculations
+rsiLength   = input.int(14, title="RSI Length")
+rsiMinLimit = input.int(50, title="RSI Lower Limit for Buy Filter", minval=1, maxval=100)
+rsiMaxLimit = input.int(70, title="RSI Upper Limit for Buy Filter", minval=1, maxval=100)
+rsiValue    = ta.rsi(close, rsiLength)
+
+// Toggle Setting for original band exit
+useBandExit = input.bool(true, title="🛡️ Exit: Cut losses if price drops back inside Upper Band")
+
+// ==========================================
+// 2. STABLE HISTORICAL DATA TRACKING (Calculated Globally)
+// ==========================================
+
+prevVolume1 = volume[1]
+prevVolume2 = volume[2]
+prevVolume3 = volume[3]
+
+// Volume Isolation Math
+baseVolumeSpike   = volume >= (2 * prevVolume1)
+halfOfBreakoutVol = 0.5 * volume
+volumeIsIsolated  = baseVolumeSpike and (prevVolume1 < halfOfBreakoutVol) and (prevVolume2 < halfOfBreakoutVol) and (prevVolume3 < halfOfBreakoutVol)
+
+// Core Buy Setup Trigger
+openInside        = (open > bbLower) and (open < bbUpper)
+closeOutsideUpper = close > bbUpper
+rsiIsInZone       = (rsiValue >= rsiMinLimit) and (rsiValue <= rsiMaxLimit)
+
+breakoutTrigger   = openInside and closeOutsideUpper and volumeIsIsolated and rsiIsInZone
+
+// Pre-calculate standard volume decay pattern globally
+isStandardExitPattern = (volume < prevVolume1) and (prevVolume1 < prevVolume2)
+
+// ==========================================
+// 3. PERSISTENT POSITION STATE ENGINE
+// ==========================================
+var int tradeState = 0
+var float entryBodySize = 0.0
+var float entryVolume = 0.0
+var int barsSinceEntry = 0
+
+// Local temporary triggers for the current bar execution loop
+bool buySignal    = false
+bool stdExit      = false
+bool failExit     = false
+bool bandExit     = false
+bool volFloodExit = false
+
+// Increment bars tracker safely at runtime
+if tradeState == 1
+    barsSinceEntry := barsSinceEntry + 1
+else
+    barsSinceEntry := 0
+
+currentBodySize = math.abs(close - open)
+isBearish       = close < open
+
+// Process State Transitions cleanly
+if tradeState == 0 and breakoutTrigger
+    buySignal      := true
+    tradeState     := 1
+    entryBodySize  := currentBodySize
+    entryVolume    := volume
+    barsSinceEntry := 0
+else if tradeState == 1
+    
+    // Exception Rules (Using your custom tuning rules)
+    bool skipBandExitCondition = false
+    if barsSinceEntry == 1 and isBearish and (currentBodySize <= entryBodySize) and (close < bbUpper)
+        skipBandExitCondition := true
+
+    bool bearishVolumeFlood = false
+    if barsSinceEntry <= 2 and isBearish and (volume > entryVolume)
+        bearishVolumeFlood := true
+
+    // Check conditions from highest priority to lowest
+    if bearishVolumeFlood
+        volFloodExit := true
+        tradeState   := 0
+    else if useBandExit and (close < bbUpper) and not skipBandExitCondition
+        bandExit     := true
+        tradeState   := 0
+    else if isBearish and (volume > 0.5 * entryVolume)
+        failExit     := true
+        tradeState   := 0
+    else if isStandardExitPattern
+        stdExit      := true
+        tradeState   := 0
+
+// ==========================================
+// 4. PLOTTING & VISUALIZATION
+// ==========================================
+
+// Plot Entry
+plotshape(buySignal, title="Buy Signal", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.normal, text="BUY")
+
+// Plot Exits based on why they triggered
+plotshape(volFloodExit, title="Bearish Volume Flood Exit", style=shape.triangledown, location=location.abovebar, color=color.maroon, size=size.normal, text="VOL FLOOD")
+plotshape(bandExit, title="Band Re-Entry Loss Cut", style=shape.triangledown, location=location.abovebar, color=color.purple, size=size.normal, text="RE-ENTRY CUT")
+plotshape(failExit, title="Fail Safe Exit", style=shape.triangledown, location=location.abovebar, color=color.orange, size=size.normal, text="FAIL EXIT")
+plotshape(stdExit, title="Standard Volume Decay Exit", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.normal, text="EXIT")
+
