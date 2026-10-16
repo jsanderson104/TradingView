@@ -1,5 +1,5 @@
 //@version=6
-indicator("BB Breakout Strategy (Engine Loop Fixed)", overlay = true)
+indicator("BB-Bullish-breakout", overlay = true)
 
 // ==========================================
 // 1. INPUTS & CALCULATIONS
