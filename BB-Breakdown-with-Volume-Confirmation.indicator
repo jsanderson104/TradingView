@@ -1,0 +1,150 @@
+//@version=6
+indicator("BB Bearish Breakout Strategy (Put Engine)", overlay = true)
+
+// ==========================================
+// 1. INPUTS & CALCULATIONS
+// ==========================================
+
+// Bollinger Bands Inputs & Calculations
+bbLength = input.int(20, title="BB Length")
+bbMult   = input.float(2.0, title="BB StdDev Multiplier")
+[bbMiddle, bbUpper, bbLower] = ta.bb(close, bbLength, bbMult)
+
+// RSI Inputs & Calculations
+rsiLength   = input.int(14, title="RSI Length")
+rsiMinLimit = input.int(25, title="RSI Lower Limit for Put Filter", minval=0, maxval=100)
+rsiMaxLimit = input.int(55, title="RSI Upper Limit for Put Filter", minval=1, maxval=100)
+rsiValue    = ta.rsi(close, rsiLength)
+
+// RSI Evaluation Switch
+rsiMode = input.string("Previous Candle (Default / Unlocked)", title="RSI Evaluation Target", options=["Previous Candle (Default / Unlocked)", "Current Breakout Candle"])
+
+// Toggle Setting for defensive band exit
+useBandExit = input.bool(true, title="🛡️ Exit: Cut losses if price climbs back inside Lower Band")
+
+// Anti-Doji Toggle (For Entries)
+filterOutDojis = input.bool(true, title="📍 Entry: Filter out / Ignore Indecisive Doji Candles")
+
+// Noise/Doji Threshold Settings for Exits
+exitDojiThreshold = input.bool(true, title="🛡️ Noise Gate: Ignore minor rest wicks outside the band")
+
+// ==========================================
+// 2. UNLOCKED GLOBAL DATA STREAM (Evaluated on every single bar)
+// ==========================================
+
+// --- PATHWAY A: Standalone Lightning Spike (Prior 3 bars were quiet) ---
+baseVolumeSpike   = volume >= (2 * volume[1])
+halfOfBreakoutVol = 0.5 * volume
+isQuietPriorBars  = (volume[1] < halfOfBreakoutVol) and (volume[2] < halfOfBreakoutVol) and (volume[3] < halfOfBreakoutVol)
+standaloneSpike   = baseVolumeSpike and isQuietPriorBars
+
+// --- PATHWAY B: Institutional Cascade (3 increasing red volume bars) ---
+isThreeRedCandles    = (close < open) and (close[1] < open[1]) and (close[2] < open[2])
+isVolumeCascading    = (volume > volume[1]) and (volume[1] > volume[2])
+institutionalCascade = isThreeRedCandles and isVolumeCascading
+
+// Unified Volume Validation (Triggers if either pathway passes)
+volumeIsIsolated = standaloneSpike or institutionalCascade
+
+// Core Breakdown Setup parameters
+openInside        = (open[1] > bbLower[1]) and (open[1] < bbUpper[1]) 
+closeOutsideLower = close < bbLower                       
+
+// Select RSI Source completely outside execution loop scope
+rsiTargetValue = (rsiMode == "Previous Candle (Default / Unlocked)") ? rsiValue[1] : rsiValue
+rsiIsInZone    = (rsiTargetValue >= rsiMinLimit) and (rsiTargetValue <= rsiMaxLimit)
+
+// --- CANDLE GEOMETRY NATIVE CHECKS ---
+candleTotalRange  = high - low
+candleBodySize    = math.abs(close - open)
+
+// Entry Filter (Body must be at least 25% of total range to avoid thin entry wicks)
+isRealTrendCandle = (candleTotalRange > 0) and ((candleBodySize >= 0.25 * candleTotalRange) or (close <= low + 0.25 * candleTotalRange))
+dojiFilterValid   = not filterOutDojis or isRealTrendCandle
+
+// Consolidated Entry Trigger Conditions
+breakoutTrigger   = volumeIsIsolated and closeOutsideLower and openInside and rsiIsInZone and dojiFilterValid
+
+// ==========================================
+// 3. PERSISTENT POSITION STATE ENGINE
+// ==========================================
+// State tracking: 0 = Flat/No Position, -1 = Active Put Position
+var int tradeState = 0
+var float entryBodySize = 0.0
+var float entryVolume = 0.0
+var int barsSinceEntry = 0
+
+// Increment tracking timeline safely
+if tradeState == -1
+    barsSinceEntry := barsSinceEntry + 1
+else
+    barsSinceEntry := 0
+
+// Local temporary triggers for the current bar execution loop
+bool putBuySignal       = false
+bool bandExit           = false
+bool setupFakeoutExit   = false
+bool volFloodExit       = false
+bool buyerPressureExit  = false
+
+// Process State Transitions cleanly
+if tradeState == 0 and breakoutTrigger
+    putBuySignal   := true
+    tradeState     := -1
+    entryBodySize  := candleBodySize
+    entryVolume    := volume
+    barsSinceEntry := 0
+else if tradeState == -1
+    
+    // Core structural states for current candle
+    isGreenCandle = close > open
+    
+    // Identify if this bar is a doji/micro-candle (body size less than 15% of range)
+    isCurrentCandleNoise = candleTotalRange > 0 and (candleBodySize <= (candleTotalRange * 0.15))
+    isStuckOutsideBand   = (open < bbLower) and (close < bbLower)
+    
+    // Noise Gate: Ignore minor rest wicks outside the band strictly on Candle 1
+    bool activateNoiseGate = exitDojiThreshold and (barsSinceEntry == 1) and isCurrentCandleNoise and isStuckOutsideBand
+
+    // --- CREEPING TREND EXCEPTION ---
+    // If the body size is shrinking compared to the previous bar, and the previous candle itself was a bearish driver
+    bool isCreepingTrend = (close <= bbLower) and (math.abs(close[1] - open[1]) > candleBodySize) and (close[1] < open[1])
+
+    if not activateNoiseGate
+        // Emergency Exit A: Opposing Volume Flood (Heavy incoming opposing volume on Candle 1 or 2)
+        bool bullishVolumeFlood = isGreenCandle and (volume > entryVolume) and (barsSinceEntry <= 2)
+
+        // Take Profit Rules (Enforce Candle-1 Free Zone AND check our creeping trend filter)
+        bool greenVolumePressure = isGreenCandle and (close < bbLower) and (barsSinceEntry > 1) and not isCreepingTrend
+
+        if bullishVolumeFlood
+            volFloodExit := true
+            tradeState   := 0
+        else if greenVolumePressure
+            buyerPressureExit := true
+            tradeState        := 0
+        else if isGreenCandle and (volume > 0.5 * entryVolume) // Setup Fakeout Check
+            setupFakeoutExit  := true
+            tradeState        := 0
+        else if useBandExit and (close > bbLower) // StopLoss/Exit Check (Closed back inside band)
+            bandExit     := true
+            tradeState   := 0
+
+// ==========================================
+// 4. PLOTTING & VISUALIZATION
+// ==========================================
+
+// Plot Entry
+plotshape(putBuySignal, title="Put Entry Signal", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.normal, text="BUY PUT")
+
+// Plot Exits (All using standardized unified exit text)
+plotshape(volFloodExit, title="Opposing Volume Flood Exit", style=shape.triangledown, location=location.abovebar, color=color.maroon, size=size.normal, text="Exit Puts")
+plotshape(buyerPressureExit, title="Buyer Pressure Take Profit", style=shape.triangledown, location=location.abovebar, color=color.blue, size=size.normal, text="Exit Puts")
+plotshape(setupFakeoutExit, title="Setup FakeOut Signal", style=shape.triangledown, location=location.abovebar, color=color.orange, size=size.normal, text="Exit Puts")
+plotshape(bandExit, title="StopLoss/Exit Signal", style=shape.triangledown, location=location.abovebar, color=color.purple, size=size.normal, text="Exit Puts")
+
+// ==========================================
+// 5. HARDCODED ALERTS
+// ==========================================
+alertcondition(putBuySignal, title="🚨 BB Put Option Entry", message="Bearish Breakout Downward & Volume Spike! BUY PUT CONTRACT NOW.")
+alertcondition(volFloodExit or bandExit or setupFakeoutExit or buyerPressureExit, title="⚠️ BB Put Option Exit", message="Put Option Exit Condition Met.")
